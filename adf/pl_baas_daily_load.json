@@ -1,0 +1,77 @@
+{
+  "name": "pl_baas_daily_load",
+  "properties": {
+    "description": "Template: partner SFTP -> ADLS landing -> Databricks bronze/silver/gold, with failure alert. Replace dataset / linked service names with your own.",
+    "parameters": {
+      "run_date": { "type": "string", "defaultValue": "2026-01-01" }
+    },
+    "activities": [
+      {
+        "name": "CopyPartnerFilesToLanding",
+        "type": "Copy",
+        "policy": { "timeout": "0.02:00:00", "retry": 2, "retryIntervalInSeconds": 60 },
+        "typeProperties": {
+          "source": {
+            "type": "BinarySource",
+            "storeSettings": {
+              "type": "SftpReadSettings",
+              "recursive": true,
+              "wildcardFolderPath": "outbound/transactions",
+              "wildcardFileName": "*.csv",
+              "deleteFilesAfterCompletion": false
+            }
+          },
+          "sink": {
+            "type": "BinarySink",
+            "storeSettings": { "type": "AzureBlobFSWriteSettings" }
+          }
+        },
+        "inputs": [ { "referenceName": "ds_partner_sftp_binary", "type": "DatasetReference" } ],
+        "outputs": [
+          {
+            "referenceName": "ds_adls_landing_binary",
+            "type": "DatasetReference",
+            "parameters": { "ingest_date": "@pipeline().parameters.run_date" }
+          }
+        ]
+      },
+      {
+        "name": "Bronze",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "CopyPartnerFilesToLanding", "dependencyConditions": [ "Succeeded" ] } ],
+        "policy": { "timeout": "0.02:00:00", "retry": 1, "retryIntervalInSeconds": 120 },
+        "typeProperties": { "notebookPath": "/Repos/bkn-lakehouse/notebooks/01_bronze_ingest" },
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "Silver",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "Bronze", "dependencyConditions": [ "Succeeded" ] } ],
+        "policy": { "timeout": "0.03:00:00", "retry": 1, "retryIntervalInSeconds": 120 },
+        "typeProperties": { "notebookPath": "/Repos/bkn-lakehouse/notebooks/02_silver_transform" },
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "Gold",
+        "type": "DatabricksNotebook",
+        "dependsOn": [ { "activity": "Silver", "dependencyConditions": [ "Succeeded" ] } ],
+        "policy": { "timeout": "0.03:00:00", "retry": 1, "retryIntervalInSeconds": 120 },
+        "typeProperties": { "notebookPath": "/Repos/bkn-lakehouse/notebooks/03_gold_aggregates" },
+        "linkedServiceName": { "referenceName": "ls_databricks", "type": "LinkedServiceReference" }
+      },
+      {
+        "name": "AlertOnFailure",
+        "type": "WebActivity",
+        "dependsOn": [ { "activity": "Gold", "dependencyConditions": [ "Failed", "Skipped" ] } ],
+        "typeProperties": {
+          "method": "POST",
+          "url": "@pipeline().globalParameters.alert_webhook_url",
+          "headers": { "Content-Type": "application/json" },
+          "body": {
+            "text": "@concat('Pipeline ', pipeline().Pipeline, ' failed for run_date ', pipeline().parameters.run_date, ' (run id ', pipeline().RunId, ')')"
+          }
+        }
+      }
+    ]
+  }
+}
